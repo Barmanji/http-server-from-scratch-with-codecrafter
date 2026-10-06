@@ -1,6 +1,9 @@
-use std::{io::{Read, Write}, net::TcpStream};
 #[allow(unused_imports)]
 use std::net::TcpListener;
+use std::{
+    io::{Read, Write},
+    net::TcpStream,
+};
 
 fn handle_connection(mut stream: TcpStream) {
     let mut buf = [0u8; 1024];
@@ -12,6 +15,7 @@ fn handle_connection(mut stream: TcpStream) {
 
     let request = String::from_utf8_lossy(&buf[..n]);
 
+    println!("{request}");
     let path = request
         .lines()
         .next()
@@ -19,17 +23,23 @@ fn handle_connection(mut stream: TcpStream) {
         .unwrap_or("");
 
     let response = match path {
-        "/" => "HTTP/1.1 200 OK\r\n\r\n",
-        _ => "HTTP/1.1 404 Not Found\r\n\r\n",
+        "/" => {
+            stream.write(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+        }
+        path if path.starts_with("/echo") => {
+            let echo_path = path.strip_prefix("/echo/").unwrap();
+            stream.write(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",echo_path.len(),echo_path).as_bytes()).unwrap();
+        }
+        _ => {
+            stream.write(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap();
+        }
     };
 
-    let _ = stream.write_all(response.as_bytes());
 }
 
 fn main() {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     println!("Logs from your program will appear here!");
-
 
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
