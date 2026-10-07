@@ -34,10 +34,12 @@ fn handle_connection(mut stream: TcpStream) {
         "/" => {
             stream.write(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
         }
+        // Stage - 4
         path if path.starts_with("/echo") => {
             let echo_path = path.strip_prefix("/echo/").unwrap();
             stream.write(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",echo_path.len(),echo_path).as_bytes()).unwrap();
         }
+        // stage - 5
         "/user-agent" => {
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
