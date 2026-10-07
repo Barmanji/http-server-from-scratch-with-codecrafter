@@ -1,82 +1,135 @@
-#[allow(unused_imports)]
-use std::net::TcpListener;
-use std::{
-    io::{Read, Write, Lines, BufRead, BufReader},
-    net::TcpStream,
-    env, fs
+#[allow(unused_imports)]use std::{
+    env, fs,
+    io::{BufRead, BufReader, Read, Write},
+    net::{TcpListener, TcpStream},
+    path::{Path, PathBuf},
+    thread,
 };
 
-fn handle_connection(mut stream: TcpStream) {
-    let mut buf_reader = BufReader::new(&mut stream);
-    let mut lines = buf_reader.by_ref().lines();
-    let response;
-
-    let request_line = lines.next().unwrap().unwrap();
-    let filepath = request_line.split_whitespace().nth(1).unwrap();
-
-    if filepath == "/" {
-        response = "HTTP/1.1 200 OK\r\n\r\n".to_string();
-    } else if request_line.contains("/echo/") {
-        let str = filepath.trim_start_matches("/echo/");
-        response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-            str.len(),
-            str
-        )
-        .to_string();
-    } else if request_line.contains("/user-agent") {
-        let header = extract_headers(lines);
-        response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-            header.len(),
-            header
-        )
-        .to_string();
-    } else if filepath.starts_with("/files") {
-        let file_name = filepath.trim_start_matches("/files/");
-        let env_args: Vec<String> = env::args().collect();
-        let mut dir = env_args[2].clone();
-        dir.push_str(&file_name);
-        let file = fs::read(dir);
-        match file {
-            Ok(fc) => {
-                response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n{}\r\n", fc.len(), String::from_utf8(fc).expect("file content")).to_string();
-            }
-            Err(..) => response = "HTTP/1.1 404 Not Found\r\n\r\n".to_string(),
-        }
-    } else {
-        response = "HTTP/1.1 404 Not Found\r\n\r\n".to_string();
-    }
-    stream.write_all(response.as_bytes()).unwrap();
-}
-
-fn extract_headers(mut lines: Lines<&mut BufReader<&mut TcpStream>>) -> String {
-    let mut headers = String::new();
-    for line in lines.by_ref() {
-        let line = line.unwrap();
-        if line == "" {
-            break;
-        }
-
-        if line.to_lowercase().starts_with("user-agent:") {
-            headers = line["User-Agent:".len()..].trim().to_string();
-        }
-    }
-    headers
-}
-
 fn main() {
+    let dir = parse_directory();
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                std::thread::spawn(|| handle_connection(stream));
+                let dir = dir.clone();
+                thread::spawn(move || handle_connection(stream, dir));
             }
-            Err(e) => {
-                println!("error: {}", e);
-            }
+            Err(e) => println!("error: {}", e),
         }
     }
 }
 
+// Finds the value after `--directory` in the command-line arguments.
+fn parse_directory() -> Option<String> {
+    let args: Vec<String> = env::args().collect();
+    let i = args.iter().position(|a| a == "--directory")?;
+    args.get(i + 1).cloned()
+}
 
+// Builds dir/name, refusing names that could escape the directory.
+fn safe_path(dir: &Option<String>, name: &str) -> Option<PathBuf> {
+    let dir = dir.as_ref()?;
+    if name.is_empty() || name.contains("..") || name.contains('/') {
+        return None;
+    }
+    Some(Path::new(dir).join(name))
+}
+
+fn text_response(body: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .into_bytes()
+}
+
+fn not_found() -> Vec<u8> {
+    b"HTTP/1.1 404 Not Found\r\n\r\n".to_vec()
+}
+
+fn handle_connection(mut stream: TcpStream, dir: Option<String>) {
+    // Reader works on a clone of the socket, so we can still write to `stream`.
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+
+    // 1. Request line: "POST /files/abc HTTP/1.1"
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+        return; // client closed without sending anything
+    }
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("");
+
+    // 2. Headers: read line by line until the blank line.
+    let mut user_agent = String::new();
+    let mut content_length: usize = 0;
+
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        let line = line.trim_end(); // removes the trailing \r\n
+        if line.is_empty() {
+            break; // blank line = end of headers; body (if any) starts next
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let value = value.trim();
+            if name.eq_ignore_ascii_case("user-agent") {
+                user_agent = value.to_string();
+            } else if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.parse().unwrap_or(0);
+            }
+        }
+    }
+
+    // 3. Route on (method, path).
+    let response: Vec<u8> = match (method, path) {
+        ("GET", "/") => b"HTTP/1.1 200 OK\r\n\r\n".to_vec(),
+
+        ("GET", "/user-agent") => text_response(&user_agent),
+
+        ("GET", p) if p.starts_with("/echo/") => {
+            text_response(p.strip_prefix("/echo/").unwrap())
+        }
+
+        ("GET", p) if p.starts_with("/files/") => {
+            let name = p.strip_prefix("/files/").unwrap();
+            match safe_path(&dir, name).map(fs::read) {
+                Some(Ok(bytes)) => {
+                    let mut resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+                        bytes.len()
+                    )
+                    .into_bytes();
+                    resp.extend_from_slice(&bytes); // body stays raw bytes
+                    resp
+                }
+                _ => not_found(),
+            }
+        }
+
+        ("POST", p) if p.starts_with("/files/") => {
+            let name = p.strip_prefix("/files/").unwrap();
+            match safe_path(&dir, name) {
+                Some(full_path) => {
+                    // Read exactly Content-Length bytes from the same reader.
+                    let mut body = vec![0u8; content_length];
+                    if reader.read_exact(&mut body).is_ok() && fs::write(full_path, &body).is_ok() {
+                        b"HTTP/1.1 201 Created\r\n\r\n".to_vec()
+                    } else {
+                        b"HTTP/1.1 500 Internal Server Error\r\n\r\n".to_vec()
+                    }
+                }
+                None => not_found(),
+            }
+        }
+
+        _ => not_found(),
+    };
+
+    let _ = stream.write_all(&response);
+}
