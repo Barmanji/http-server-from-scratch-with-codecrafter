@@ -14,6 +14,7 @@ fn handle_connection(mut stream: TcpStream) {
     };
 
     let request = String::from_utf8_lossy(&buf[..n]);
+
     let mut user_agent = "";
     for line in request.lines().skip(1) {
         if let Some((name, value)) = line.split_once(':') {
@@ -59,6 +60,9 @@ fn main() {
     println!("Logs from your program will appear here!");
 
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
+     for stream in listener.incoming() {
+        std::thread::spawn(|| handle_connection(stream.unwrap()));
+    }
 
     for stream in listener.incoming() {
         match stream {
