@@ -1,73 +1,76 @@
 #[allow(unused_imports)]
 use std::net::TcpListener;
 use std::{
-    io::{Read, Write},
+    io::{Read, Write, Lines, BufRead, BufReader},
     net::TcpStream,
+    env, fs
 };
 
 fn handle_connection(mut stream: TcpStream) {
-    let mut buf = [0u8; 1024];
+    let mut buf_reader = BufReader::new(&mut stream);
+    let mut lines = buf_reader.by_ref().lines();
+    let response;
 
-    let n = match stream.read(&mut buf) {
-        Ok(0) | Err(_) => return,
-        Ok(n) => n,
-    };
+    let request_line = lines.next().unwrap().unwrap();
+    let filepath = request_line.split_whitespace().nth(1).unwrap();
 
-    let request = String::from_utf8_lossy(&buf[..n]);
-
-    let mut user_agent = "";
-    for line in request.lines().skip(1) {
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim() == "User-Agent" {
-                user_agent = value.trim();
+    if filepath == "/" {
+        response = "HTTP/1.1 200 OK\r\n\r\n".to_string();
+    } else if request_line.contains("/echo/") {
+        let str = filepath.trim_start_matches("/echo/");
+        response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+            str.len(),
+            str
+        )
+        .to_string();
+    } else if request_line.contains("/user-agent") {
+        let header = extract_headers(lines);
+        response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+            header.len(),
+            header
+        )
+        .to_string();
+    } else if filepath.starts_with("/files") {
+        let file_name = filepath.trim_start_matches("/files/");
+        let env_args: Vec<String> = env::args().collect();
+        let mut dir = env_args[2].clone();
+        dir.push_str(&file_name);
+        let file = fs::read(dir);
+        match file {
+            Ok(fc) => {
+                response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n{}\r\n", fc.len(), String::from_utf8(fc).expect("file content")).to_string();
             }
+            Err(..) => response = "HTTP/1.1 404 Not Found\r\n\r\n".to_string(),
+        }
+    } else {
+        response = "HTTP/1.1 404 Not Found\r\n\r\n".to_string();
+    }
+    stream.write_all(response.as_bytes()).unwrap();
+}
+
+fn extract_headers(mut lines: Lines<&mut BufReader<&mut TcpStream>>) -> String {
+    let mut headers = String::new();
+    for line in lines.by_ref() {
+        let line = line.unwrap();
+        if line == "" {
+            break;
+        }
+
+        if line.to_lowercase().starts_with("user-agent:") {
+            headers = line["User-Agent:".len()..].trim().to_string();
         }
     }
-
-    println!("res: {request}");
-    let path = request
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .unwrap_or("");
-
-    let response = match path {
-        "/" => {
-            stream.write(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
-        }
-        // Stage - 4
-        path if path.starts_with("/echo") => {
-            let echo_path = path.strip_prefix("/echo/").unwrap();
-            stream.write(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",echo_path.len(),echo_path).as_bytes()).unwrap();
-        }
-        // stage - 5
-        "/user-agent" => {
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-                user_agent.len(),
-                user_agent
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-        }
-        _ => {
-            stream.write(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap();
-        }
-    };
+    headers
 }
 
 fn main() {
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    println!("Logs from your program will appear here!");
-
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
-     for stream in listener.incoming() {
-        std::thread::spawn(|| handle_connection(stream.unwrap()));
-    }
-
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                handle_connection(stream);
+                std::thread::spawn(|| handle_connection(stream));
             }
             Err(e) => {
                 println!("error: {}", e);
@@ -75,3 +78,5 @@ fn main() {
         }
     }
 }
+
+
