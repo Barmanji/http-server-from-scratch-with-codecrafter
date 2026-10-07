@@ -14,8 +14,16 @@ fn handle_connection(mut stream: TcpStream) {
     };
 
     let request = String::from_utf8_lossy(&buf[..n]);
+    let mut user_agent = "";
+    for line in request.lines().skip(1) {
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim() == "User-Agent" {
+                user_agent = value.trim();
+            }
+        }
+    }
 
-    println!("{request}");
+    println!("res: {request}");
     let path = request
         .lines()
         .next()
@@ -30,11 +38,18 @@ fn handle_connection(mut stream: TcpStream) {
             let echo_path = path.strip_prefix("/echo/").unwrap();
             stream.write(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",echo_path.len(),echo_path).as_bytes()).unwrap();
         }
+        "/user-agent" => {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                user_agent.len(),
+                user_agent
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
         _ => {
             stream.write(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap();
         }
     };
-
 }
 
 fn main() {
